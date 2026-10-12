@@ -118,8 +118,12 @@ describe("MemoryStore", { concurrency: 1 }, () => {
     await removeFile(userPath);
     await removeFile(failurePath);
     const artifactNames = (await fs.readdir(MEMORY_DIR))
-      .filter((name) => name.includes(".recovery-") || name.includes(".retired-") || name.includes(".conflict-"));
-    await Promise.all(artifactNames.map((name) => removeFile(path.join(MEMORY_DIR, name))));
+      .filter((name) => name.includes(".recovery-") || name.includes(".retired-") || name.includes(".conflict-")
+        || name === "COLD.md" || name === "INDEX.md");
+    // fs.rm (not removeFile) so a sabotaged COLD.md *directory* is handled too
+    await Promise.all(artifactNames.map((name) => fs.rm(path.join(MEMORY_DIR, name), { recursive: true, force: true })));
+    const coldDirs = (await fs.readdir(MEMORY_DIR)).filter((name) => name.includes(".tmp-cold-"));
+    await Promise.all(coldDirs.map((name) => fs.rm(path.join(MEMORY_DIR, name), { recursive: true, force: true })));
     await new Promise((r) => setTimeout(r, 50));
   }
 
@@ -459,7 +463,10 @@ describe("MemoryStore", { concurrency: 1 }, () => {
 
       assert.ok(result.success, result.error);
       assert.equal(consolidatorCalled, false);
-      assert.equal(result.message, "Memory updated. Rotated 1 older entry to stay within the limit.");
+      assert.match(
+        result.message ?? "",
+        /^Memory updated\. Rotated 1 older entry to stay within the limit\.( Archived 1 to COLD\.md \+ INDEX\.md \(.+\)\.)?$/,
+      );
       assert.deepEqual(result.evicted_entries, [first]);
       assert.equal(result.evicted_count, 1);
       assert.equal(result.entry_count, 2);
@@ -469,6 +476,110 @@ describe("MemoryStore", { concurrency: 1 }, () => {
       assert.ok(raw.includes(second));
       assert.ok(raw.includes(next));
       assert.ok(raw.indexOf(second) < raw.indexOf(next));
+    });
+
+    it("archives evicted entries to COLD.md + INDEX.md with provenance when fifo-evict rotates", async () => {
+      const store = new MemoryStore(makeConfig({
+        memoryCharLimit: 150,
+        memoryOverflowStrategy: "fifo-evict",
+      }));
+      await store.loadFromDisk();
+
+      const first = `${TEST_MARKER} cold archive first entry`;
+      const next = `${TEST_MARKER} cold archive next entry`;
+      assert.ok((await store.add("memory", first)).success);
+
+      const result = await store.add("memory", next);
+      await settle();
+
+      assert.ok(result.success, result.error);
+      assert.match(result.message ?? "", /Archived 1 to COLD\.md \+ INDEX\.md/);
+
+      const cold = await readRaw(path.join(MEMORY_DIR, "COLD.md"));
+      const index = await readRaw(path.join(MEMORY_DIR, "INDEX.md"));
+
+      // Archive keeps the evicted text verbatim, with provenance header
+      assert.ok(cold.includes(first), "COLD.md must contain evicted entry verbatim");
+      assert.match(cold, /^### id=[0-9a-f]{10} · target=memory · created=\d{4}-\d{2}-\d{2}/m);
+      // Index has one greppable pointer line with a summary
+      assert.match(index, /^- \[[0-9a-f]{10}\] \(memory\) /m);
+      assert.ok(index.includes("cold archive first entry"), "INDEX.md must summarize the evicted entry");
+      // Hot store no longer has the entry
+      const raw = await readRaw(memoryPath);
+      assert.ok(!raw.includes(first));
+    });
+
+    it("skips duplicate cold entries when identical content is evicted twice", async () => {
+      const store = new MemoryStore(makeConfig({
+        memoryCharLimit: 150,
+        memoryOverflowStrategy: "fifo-evict",
+      }));
+      await store.loadFromDisk();
+
+      const duplicateText = `${TEST_MARKER} dedupe me in cold storage`;
+      const next = `${TEST_MARKER} cold dedupe next entry`;
+
+      // Evict the same content twice (two fresh stores, same memoryDir)
+      for (let i = 0; i < 2; i++) {
+        const evictStore = new MemoryStore(makeConfig({
+          memoryCharLimit: 150,
+          memoryOverflowStrategy: "fifo-evict",
+        }));
+        await evictStore.loadFromDisk();
+        assert.ok((await evictStore.add("memory", duplicateText)).success);
+        assert.ok((await evictStore.add("memory", next)).success);
+        await settle();
+      }
+
+      const cold = await readRaw(path.join(MEMORY_DIR, "COLD.md"));
+      const occurrences = cold.split(duplicateText).length - 1;
+      assert.equal(occurrences, 1, `expected 1 archived copy, found ${occurrences}`);
+    });
+
+    it("does not archive when coldArchiveEnabled is false", async () => {
+      const store = new MemoryStore(makeConfig({
+        memoryCharLimit: 150,
+        memoryOverflowStrategy: "fifo-evict",
+        coldArchiveEnabled: false,
+      }));
+      await store.loadFromDisk();
+
+      const first = `${TEST_MARKER} no cold archive entry`;
+      const next = `${TEST_MARKER} no cold archive next`;
+      assert.ok((await store.add("memory", first)).success);
+
+      const result = await store.add("memory", next);
+      await settle();
+
+      assert.ok(result.success, result.error);
+      assert.ok(!((result.message ?? "").includes("Archived")), "message must not mention archiving");
+      assert.equal(await readRaw(path.join(MEMORY_DIR, "COLD.md")), "", "COLD.md must not exist");
+      assert.equal(await readRaw(path.join(MEMORY_DIR, "INDEX.md")), "", "INDEX.md must not exist");
+      assert.deepEqual(result.evicted_entries, [first]);
+    });
+
+    it("eviction succeeds even when cold archival fails (best effort)", async () => {
+      const store = new MemoryStore(makeConfig({
+        memoryCharLimit: 150,
+        memoryOverflowStrategy: "fifo-evict",
+      }));
+      await store.loadFromDisk();
+
+      // Sabotage: COLD.md as a directory makes the atomic archive write fail
+      await fs.mkdir(path.join(MEMORY_DIR, "COLD.md"));
+
+      const first = `${TEST_MARKER} sabotage archive entry`;
+      const next = `${TEST_MARKER} sabotage archive next`;
+      assert.ok((await store.add("memory", first)).success);
+
+      const result = await store.add("memory", next);
+      await settle();
+
+      assert.ok(result.success, result.error);
+      assert.deepEqual(result.evicted_entries, [first]);
+      assert.ok(!((result.message ?? "").includes("Archived")), "message must not claim archival");
+      const raw = await readRaw(memoryPath);
+      assert.ok(!raw.includes(first), "evicted entry must still leave the hot store");
     });
 
     it("does not evict when the new entry cannot fit an empty memory", async () => {

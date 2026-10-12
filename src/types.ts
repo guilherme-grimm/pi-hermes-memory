@@ -59,6 +59,8 @@ export interface MemoryConfig {
   sessionSearch?: SessionSearchConfig;
   /** Run a full SQLite quick_check asynchronously after opening. Default: true */
   quickCheckOnOpen?: boolean;
+  /** Archive fifo-evicted entries to COLD.md + INDEX.md instead of dropping them. Default true. */
+  coldArchiveEnabled?: boolean;
   /** Override model used for child pi -p subprocess LLM calls. Default: unset */
   llmModelOverride?: string;
   /** Fallback model chain tried in order when the primary review model fails (rate limit, 401/403, 404, 500/503, invalid response). Default: unset */

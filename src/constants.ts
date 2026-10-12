@@ -88,6 +88,10 @@ export const MEMORY_FILE = "MEMORY.md";
 export const USER_FILE = "USER.md";
 export const STANDING_FILE = "STANDING.md";
 
+// ─── Cold archive (eviction tier) ───
+export const COLD_FILE = "COLD.md";
+export const INDEX_FILE = "INDEX.md";
+
 // ─── Markdown→SQLite sync state ───
 /**
  * Key prefix for per-scope reconcile fingerprints in `extension_metadata`.

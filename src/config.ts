@@ -78,6 +78,7 @@ const DEFAULT_CONFIG: MemoryConfig = {
   projectsMemoryDir: DEFAULT_PROJECTS_MEMORY_DIR,
   sessionSearch: { variant: "legacy" },
   quickCheckOnOpen: true,
+  coldArchiveEnabled: true,
   sessionRetentionDays: DEFAULT_SESSION_RETENTION_DAYS,
 };
 
@@ -198,6 +199,7 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
         config.sessionSearch = { variant: parsed.sessionSearch.variant };
       }
       if (typeof parsed.quickCheckOnOpen === "boolean") config.quickCheckOnOpen = parsed.quickCheckOnOpen;
+      if (typeof parsed.coldArchiveEnabled === "boolean") config.coldArchiveEnabled = parsed.coldArchiveEnabled;
       if (typeof parsed.llmModelOverride === "string") {
         const trimmed = parsed.llmModelOverride.trim();
         if (trimmed.length > 0) config.llmModelOverride = trimmed;
