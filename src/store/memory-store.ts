@@ -15,6 +15,8 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scanContent } from "./content-scanner.js";
+import { appendEvictedToColdArchive } from "./cold-archive.js";
+import type { ColdEntry } from "./cold-archive.js";
 import { normalizeMemoryLookupText } from "./memory-lookup.js";
 import {
   ENTRY_DELIMITER,
@@ -368,20 +370,42 @@ export class MemoryStore {
 
     const remaining = [...entries];
     const evictedEntries: string[] = [];
+    const evictedColdEntries: ColdEntry[] = [];
 
     while ([...remaining, encoded].join(ENTRY_DELIMITER).length > limit && remaining.length > 0) {
       const evicted = remaining.shift()!;
       evictedEntries.push(this.stripMetadata(evicted));
+      const decoded = this.decodeEntry(evicted);
+      evictedColdEntries.push({
+        text: decoded.text,
+        created: decoded.created,
+        lastReferenced: decoded.lastReferenced,
+        project: decoded.project,
+      });
     }
 
     remaining.push(encoded);
     this.setEntries(target, remaining);
     await this.saveToDisk(target);
 
+    let coldNote = "";
+    if (evictedColdEntries.length > 0 && this.config.coldArchiveEnabled !== false) {
+      try {
+        const archived = await appendEvictedToColdArchive(this.memoryDir, target, evictedColdEntries);
+        if (archived.archivedIds.length > 0) {
+          coldNote = ` Archived ${archived.archivedIds.length} to COLD.md + INDEX.md (${archived.coldPath}).`;
+        }
+      } catch {
+        // Cold archival is best effort: the entries are already surfaced in
+        // evicted_entries below, which is the pre-archive behavior. Never let
+        // an archive failure roll back or fail the hot-store eviction.
+      }
+    }
+
     return {
       ...this.successResponse(
         target,
-        `Memory updated. Rotated ${evictedEntries.length} older ${evictedEntries.length === 1 ? "entry" : "entries"} to stay within the limit.`,
+        `Memory updated. Rotated ${evictedEntries.length} older ${evictedEntries.length === 1 ? "entry" : "entries"} to stay within the limit.${coldNote}`,
       ),
       evicted_entries: evictedEntries,
       evicted_count: evictedEntries.length,
